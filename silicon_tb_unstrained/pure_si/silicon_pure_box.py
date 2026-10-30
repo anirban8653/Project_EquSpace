@@ -19,6 +19,7 @@ import argparse
 import itertools
 import warnings
 from pathlib import Path
+from scipy.optimize import minimize_scalar
 import numpy as np
 from silicon_unstrained import A, BONDS, onsite, hopping, make_real_space, bloch_hamiltonian
 from scipy.sparse import identity
@@ -29,7 +30,7 @@ from scipy.sparse.linalg import splu, LinearOperator, lobpcg
 # ----------------------------------------------------------------------------
 # PARAMETER BLOCK: edit here (command-line flags override these defaults)
 # ----------------------------------------------------------------------------
-NCELLS = 6             # conventional cells per axis: int, or (Nx, Ny, Nz)
+NCELLS = 2             # conventional cells per axis: int, or (Nx, Ny, Nz)
 PERIODIC = True        # periodic boundaries: bool, or (px, py, pz)
 SPIN = True            # include spin-orbit / spin degrees of freedom
 NLEVELS = 24           # states requested on each side of the gap (sparse route)
