@@ -32,11 +32,10 @@ silicon_tb_unstrained/
 │   ├── plot_silicon_bands.ipynb   #   band structure + lattice/orbital schematic
 │   ├── silicon_bands.png
 │   └── si_unitcell_orbitals.png
-├── pure_si/                       # Step 2: pristine reference box (+ updated donor script)
+├── pure_si/                       # Step 2: pristine reference box
+│   ├── silicon_unstrained.py      #   copy of the core TB module
 │   ├── silicon_pure_box.py        #   box band edges, folded vs sparse cross-check
-│   ├── silicon_bi_donor.py        #   donor script with parameter block, open/periodic axes
-│   ├── plot_silicon_bands.ipynb   #   bands + box levels + donor levels
-│   └── silicon_bands.png / .svg, si_unitcell_orbitals.png
+│   └── plot_silicon_bands.ipynb   #   bands + box levels + donor levels
 └── Bi_donor/                      # Step 3: Bi donor in a periodic box
     ├── silicon_unstrained.py      #   copy of the core TB module
     ├── silicon_bi_donor.py        #   donor Hamiltonian + shift-invert solver
@@ -72,6 +71,8 @@ Builds exactly the same supercell as the donor run, but without Bi, to obtain th
 
 `E_B = E_c^box − E_donor`
 
+> **Note:** `silicon_pure_box.py` imports `bulk_edges` and `box_geometry` from `silicon_bi_donor.py`, which is not currently in `pure_si/`. Until a version of `silicon_bi_donor.py` that defines `box_geometry` is added to this folder, the script will not run.
+
 Two independent routes are used for a fully periodic box and must agree, which also validates `make_real_space`:
 - **folded** — exact: diagonalise the bulk Bloch Hamiltonian at the k-points folded into the box, `k = 2π(n₁/Nx, n₂/Ny, n₃/Nz)/a`;
 - **sparse** — shift-invert + LOBPCG on the real-space Hamiltonian.
@@ -82,7 +83,7 @@ python silicon_pure_box.py --ncells 6                 # box edges for a 6×6×6 
 python silicon_pure_box.py --scan 2 4 6 8 --no-sparse # convergence of E_c^box with box size
 ```
 
-### Step 3 — Bi donor (`Bi_donor/` or `pure_si/silicon_bi_donor.py`)
+### Step 3 — Bi donor (`Bi_donor/silicon_bi_donor.py`)
 1. `bulk_edges()` — locate the bulk VBM and Δ-valley CBM.
 2. `make_donor()` — build the box, substitute Bi near the centre, add the minimum-image screened Coulomb tail to all host sites, insert the Bi central-cell block.
 3. `solve_near()` — sparse shift-invert (`eigsh`) for the states nearest a target energy (default `CBM − 0.07 eV`).
@@ -94,7 +95,6 @@ python silicon_bi_donor.py --ncells 2                    # small test box
 python silicon_bi_donor.py --ncells 4 --nstates 12 --save-vectors
 python silicon_bi_donor.py --ncells 4 --build-only       # only report matrix size / memory
 ```
-The `pure_si/` version additionally accepts `--ncells Nx Ny Nz` and `--periodic true false ...` and has an editable parameter block at the top of the file.
 
 **Outputs** (`results/bi_donor.*`):
 - `.dat` — columns `E_eV, CBM_minus_E_meV, residual_eV, P_Bi, rms_radius_A, outer_weight, contact_proxy, in_bulk_gap`
@@ -125,11 +125,13 @@ The Hamiltonian is always kept sparse (never convert large boxes to dense). Shif
 ## Current limitations
 
 - **Unstrained only**; no lattice relaxation around Bi.
+- Donor boxes are fully periodic (cubic `ncells × ncells × ncells`); open boundaries are only available in `make_real_space`.
 - Periodic boxes use a **minimum-image** Coulomb tail, not an Ewald sum — small boxes are prototypes, not isolated-donor results (check `outer_weight`).
-- Open boundaries are **unpassivated** and produce dangling-bond states in the gap.
+- Open boundaries (in `make_real_space`) are **unpassivated** and produce dangling-bond states in the gap.
 - `solve_near` returns states nearest `σ`; it is not guaranteed to capture every bound state.
 - The hyperfine output is a relative proxy, not an absolute value in MHz.
 - No Zeeman term or nuclear hyperfine Hamiltonian yet.
+- `pure_si/silicon_pure_box.py` currently needs a `silicon_bi_donor.py` (with `box_geometry`) in the same folder — see Step 2.
 
 ---
 
@@ -141,7 +143,7 @@ Python ≥ 3.10 with `numpy`, `scipy`, `matplotlib` (for notebooks) and `jupyter
 pip install numpy scipy matplotlib jupyter
 ```
 
-Each script imports `silicon_unstrained.py` from its own directory. The scripts in `pure_si/` also need a copy of `silicon_unstrained.py` in that folder (it is currently only present in `Si_bands/` and `Bi_donor/`).
+Each script imports `silicon_unstrained.py` from its own directory; every folder (`Si_bands/`, `pure_si/`, `Bi_donor/`) contains its own copy, so run scripts from inside their folder.
 
 ---
 
