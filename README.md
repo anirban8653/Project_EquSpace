@@ -26,6 +26,7 @@ The current code covers the **unstrained** case: bulk silicon, a pristine silico
 ## Repository layout
 
 ```
+Bi_donor_algorithm.pdf             # step-by-step guide to make_donor() (donor Hamiltonian assembly)
 silicon_tb_unstrained/
 ├── Si_bands/                      # Step 1: bulk silicon
 │   ├── silicon_unstrained.py      #   core TB module (onsite, hopping, Bloch H, real-space H)
@@ -35,10 +36,11 @@ silicon_tb_unstrained/
 ├── pure_si/                       # Step 2: pristine reference box
 │   ├── silicon_unstrained.py      #   copy of the core TB module
 │   ├── silicon_pure_box.py        #   box band edges, folded vs sparse cross-check
-│   └── plot_silicon_bands.ipynb   #   bands + box levels + donor levels
+│   ├── plot_silicon_bands.ipynb   #   bands + box levels + donor levels
+│   └── results/si_box.npz
 └── Bi_donor/                      # Step 3: Bi donor in a periodic box
     ├── silicon_unstrained.py      #   copy of the core TB module
-    ├── silicon_bi_donor.py        #   donor Hamiltonian + shift-invert solver
+    ├── silicon_bi_donor.py        #   donor Hamiltonian + shift-invert solver (open/periodic axes)
     └── results/bi_donor.dat, bi_donor.npz
 ```
 
@@ -71,21 +73,26 @@ Builds exactly the same supercell as the donor run, but without Bi, to obtain th
 
 `E_B = E_c^box − E_donor`
 
-> **Note:** `silicon_pure_box.py` imports `bulk_edges` and `box_geometry` from `silicon_bi_donor.py`, which is not currently in `pure_si/`. Until a version of `silicon_bi_donor.py` that defines `box_geometry` is added to this folder, the script will not run.
-
 Two independent routes are used for a fully periodic box and must agree, which also validates `make_real_space`:
 - **folded** — exact: diagonalise the bulk Bloch Hamiltonian at the k-points folded into the box, `k = 2π(n₁/Nx, n₂/Ny, n₃/Nz)/a`;
 - **sparse** — shift-invert + LOBPCG on the real-space Hamiltonian.
 
+The script is self-contained (it only needs `silicon_unstrained.py`). Defaults are set in the parameter block at the top of the file (`NCELLS`, `PERIODIC`, `SPIN`, `NLEVELS`, `DEGEN_TOL`, `OUT`); command-line flags override them.
+
 ```bash
 cd silicon_tb_unstrained/pure_si
 python silicon_pure_box.py --ncells 6                 # box edges for a 6×6×6 box
+python silicon_pure_box.py --ncells 4 4 6             # non-cubic box (Nx Ny Nz)
 python silicon_pure_box.py --scan 2 4 6 8 --no-sparse # convergence of E_c^box with box size
 ```
 
+Output: `results/si_box.npz` (`Ec_box_eV` is the reference for donor binding energies). On open axes only the sparse route is available.
+
 ### Step 3 — Bi donor (`Bi_donor/silicon_bi_donor.py`)
+See `Bi_donor_algorithm.pdf` for an illustrated, step-by-step walkthrough of the Hamiltonian assembly.
+
 1. `bulk_edges()` — locate the bulk VBM and Δ-valley CBM.
-2. `make_donor()` — build the box, substitute Bi near the centre, add the minimum-image screened Coulomb tail to all host sites, insert the Bi central-cell block.
+2. `make_donor()` — build the box (`box_geometry()`), substitute Bi near the centre, add the screened Coulomb tail to all host sites (nearest-image distance along periodic axes via `min_image()`, plain distance along open axes), insert the Bi central-cell block.
 3. `solve_near()` — sparse shift-invert (`eigsh`) for the states nearest a target energy (default `CBM − 0.07 eV`).
 4. Analyse each state: binding energy, weight on the Bi site, RMS radius, weight in the outer 20 % of the box (finite-size check), contact-hyperfine proxy, in-gap flag.
 
@@ -94,7 +101,9 @@ cd silicon_tb_unstrained/Bi_donor
 python silicon_bi_donor.py --ncells 2                    # small test box
 python silicon_bi_donor.py --ncells 4 --nstates 12 --save-vectors
 python silicon_bi_donor.py --ncells 4 --build-only       # only report matrix size / memory
+python silicon_bi_donor.py --ncells 4 4 6 --periodic true true false   # non-cubic box, open along z
 ```
+Defaults live in the parameter block at the top of the file (`NCELLS = 4`, `PERIODIC = True`, `SPIN`, `NSTATES`, `SIGMA`, `OUT`); command-line flags override them. `--ncells` and `--periodic` take one value (all axes) or three (x y z).
 
 **Outputs** (`results/bi_donor.*`):
 - `.dat` — columns `E_eV, CBM_minus_E_meV, residual_eV, P_Bi, rms_radius_A, outer_weight, contact_proxy, in_bulk_gap`
@@ -125,13 +134,11 @@ The Hamiltonian is always kept sparse (never convert large boxes to dense). Shif
 ## Current limitations
 
 - **Unstrained only**; no lattice relaxation around Bi.
-- Donor boxes are fully periodic (cubic `ncells × ncells × ncells`); open boundaries are only available in `make_real_space`.
-- Periodic boxes use a **minimum-image** Coulomb tail, not an Ewald sum — small boxes are prototypes, not isolated-donor results (check `outer_weight`).
-- Open boundaries (in `make_real_space`) are **unpassivated** and produce dangling-bond states in the gap.
+- Periodic axes use a **minimum-image** Coulomb tail, not an Ewald sum — small boxes are prototypes, not isolated-donor results (check `outer_weight`).
+- Open boundaries are **unpassivated** and produce dangling-bond states in the gap.
 - `solve_near` returns states nearest `σ`; it is not guaranteed to capture every bound state.
 - The hyperfine output is a relative proxy, not an absolute value in MHz.
 - No Zeeman term or nuclear hyperfine Hamiltonian yet.
-- `pure_si/silicon_pure_box.py` currently needs a `silicon_bi_donor.py` (with `box_geometry`) in the same folder — see Step 2.
 
 ---
 
