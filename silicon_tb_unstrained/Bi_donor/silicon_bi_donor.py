@@ -12,6 +12,17 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.linalg import eigsh
 from silicon_unstrained import A, LAMBDA_SO, onsite, bloch_hamiltonian, make_real_space
 
+# ----------------------------------------------------------------------------
+# PARAMETER BLOCK: edit here (command-line flags override these defaults)
+# ----------------------------------------------------------------------------
+NCELLS = 4             # conventional cells per axis: int, or (Nx, Ny, Nz); box = NCELLS*A
+PERIODIC = True        # periodic boundaries: bool, or (px, py, pz) per axis
+SPIN = True            # include spin-orbit / spin degrees of freedom
+NSTATES = 12           # number of eigenstates returned by the solver
+SIGMA = None           # shift-invert target in eV; None -> CBM - 0.07
+OUT = 'results/bi_donor'
+# ----------------------------------------------------------------------------
+
 BOHR = physical_constants['Bohr radius'][0] * 1e10 #the Bohr radius in ångströms
 COULOMB = elementary_charge / (4 * np.pi * epsilon_0) * 1e10  # the coulomb prefactor eV Angstrom
 KAPPA = 11.7 # screening by silicon or dimensionless relative dielectric constant k = eps_si/eps_0
@@ -47,16 +58,32 @@ def bi_onsite(spin=True, lambda_bi=LAMBDA_BI):
     return atomic - np.diag(np.repeat(U_BI, 2)) + soc*(lambda_bi/LAMBDA_SO)
 
 
-def make_donor(ncells=2, spin=True, donor_index=None, lambda_bi=LAMBDA_BI):
-    """Fully periodic box; nearest-image radial tail, unmodified host bonds.
+def box_geometry(ncells, periodic):
+    """Return (shape, lengths, pbc): cells per axis, box lengths (A), periodic flags."""
+    shape = np.broadcast_to(np.asarray(ncells, dtype=float), (3,))
+    if np.any(shape < 1) or np.any(shape != shape.astype(int)):
+        raise ValueError('ncells must contain positive integers')
+    shape = shape.astype(int)
+    pbc = np.broadcast_to(np.asarray(periodic, dtype=bool), (3,))
+    return shape, shape*A, pbc
 
+
+def min_image(displacement, lengths, pbc):
+    """Shortest equivalent displacement, applied only along periodic axes."""
+    return displacement - np.where(pbc, lengths*np.rint(displacement/lengths), 0.0)
+
+
+def make_donor(ncells=NCELLS, spin=SPIN, donor_index=None, lambda_bi=LAMBDA_BI,
+               periodic=PERIODIC):
+    """Box of ncells conventional cells; radial tail, unmodified host bonds.
+
+    periodic: bool or (px, py, pz). Periodic axes use the nearest-image distance;
+    open axes use the plain distance (open surfaces are unpassivated).
     Returns H, positions, donor_index, distances, scalar_tail.
     scalar_tail[donor_index]=0; the full Bi onsite block is inserted separately.
     """
-    shape = np.broadcast_to(np.asarray(ncells, dtype=float), (3,))
-    shape = shape.astype(int)
-    h, positions = make_real_space(shape, periodic=True, spin=spin)
-    lengths = shape*A
+    shape, lengths, pbc = box_geometry(ncells, periodic)
+    h, positions = make_real_space(shape, periodic=pbc, spin=spin)
 
     
     if donor_index is None:
@@ -67,7 +94,7 @@ def make_donor(ncells=2, spin=True, donor_index=None, lambda_bi=LAMBDA_BI):
 
     #calculate displacements from the donor
     displacement = positions - positions[donor_index]
-    displacement -= lengths*np.rint(displacement/lengths) # Each displacement is replaced with its shortest equivalent displacement in the rectangular periodic box.
+    displacement = min_image(displacement, lengths, pbc) # shortest equivalent displacement along periodic axes only
     radius = np.linalg.norm(displacement, axis=1) # calculates one distance per atom
     potential = np.zeros(len(positions))  # Initially, every atom has zero additional scalar potential
     
@@ -139,26 +166,37 @@ def solve_near(h, sigma, nstates=12, tol=1e-10):
 def main():
     # command line interface
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--ncells', type=int, default=2)
+    parser.add_argument('--ncells', type=int, nargs='+', default=None,
+                        help='cells per axis: one value or three (Nx Ny Nz); default NCELLS')
+    parser.add_argument('--periodic', choices=['true', 'false'], nargs='+', default=None,
+                        help='boundary condition: one value or three (x y z); default PERIODIC')
     parser.add_argument('--spinless', action='store_true')
-    parser.add_argument('--nstates', type=int, default=12)
-    parser.add_argument('--sigma', type=float, help='absolute target energy in eV; default CBM-0.07')
+    parser.add_argument('--nstates', type=int, default=NSTATES)
+    parser.add_argument('--sigma', type=float, default=SIGMA,
+                        help='absolute target energy in eV; default CBM-0.07')
     parser.add_argument('--lambda-bi', type=float, default=LAMBDA_BI)
     parser.add_argument('--build-only', action='store_true')
     parser.add_argument('--save-vectors', action='store_true')
-    parser.add_argument('--out', default='results/bi_donor')
+    parser.add_argument('--out', default=OUT)
     args = parser.parse_args()
-    spin = not args.spinless
+    spin = SPIN and not args.spinless
+    ncells = NCELLS if args.ncells is None else args.ncells
+    periodic = PERIODIC if args.periodic is None else [p == 'true' for p in args.periodic]
+    if len(np.atleast_1d(ncells)) not in (1, 3) or len(np.atleast_1d(periodic)) not in (1, 3):
+        parser.error('--ncells and --periodic take 1 or 3 values')
+    shape, lengths, pbc = box_geometry(ncells, periodic)
 
 
     # main physics part starts from here
     vbm, cbm, valley = bulk_edges(spin)
     print(f'VBM={vbm:.9f}, CBM={cbm:.9f} eV; valley k/(2pi/a)={valley:.7f}', flush=True)
-    h, positions, donor, radius, potential = make_donor(args.ncells, spin, lambda_bi=args.lambda_bi)
+    print(f'Box {shape} cells = {lengths} Angstrom; periodic (x,y,z) = {tuple(bool(p) for p in pbc)}', flush=True)
+    h, positions, donor, radius, potential = make_donor(shape, spin, lambda_bi=args.lambda_bi,
+                                                        periodic=pbc)
     storage = (h.data.nbytes+h.indices.nbytes+h.indptr.nbytes)/2**20
     print(f'{len(positions)} atoms; H={h.shape}; CSR={storage:.2f} MiB', flush=True)
     print(f'Bi site {donor}, position {positions[donor]} Angstrom', flush=True)
-    print('Minimum-image periodic prototype: small boxes are NOT isolated-donor results.', flush=True)
+    print('Small boxes are NOT isolated-donor results; open faces are unpassivated.', flush=True)
     if args.build_only:
         return
     sigma = cbm-0.07 if args.sigma is None else args.sigma
@@ -166,10 +204,8 @@ def main():
     energy, vectors, residual = solve_near(h, sigma, args.nstates)
     norb = 20 if spin else 10
     probability = np.sum(np.abs(vectors.reshape(len(positions), norb, -1))**2, axis=1)
-    # Outer 20% of the donor-centred minimum-image box, along any axis.
-    delta = positions-positions[donor]
-    lengths = np.full(3, args.ncells*A)
-    delta -= lengths*np.rint(delta/lengths)
+    # Outer 20% of the donor-centred box, along any axis.
+    delta = min_image(positions-positions[donor], lengths, pbc)
     outer = np.any(np.abs(delta) >= 0.4*lengths, axis=1)
     outer_weight = probability[outer].sum(axis=0)
     rms_radius = np.sqrt((radius**2)@probability)
@@ -189,8 +225,9 @@ def main():
     data = dict(energy_eV=energy, positions_A=positions, donor_index=donor,
                 probability=probability, radius_A=radius, tail_eV=potential,
                 residual_eV=residual, vbm_eV=vbm, cbm_eV=cbm, valley_fraction=valley,
-                ncells=args.ncells, spin=spin, sigma_eV=sigma, lambda_bi=args.lambda_bi,
-                central_cell_U_eV=U_BI, boundary_model='periodic_minimum_image',
+                ncells=shape, periodic=pbc, spin=spin, sigma_eV=sigma, lambda_bi=args.lambda_bi,
+                central_cell_U_eV=U_BI,
+                boundary_model='minimum_image_on_periodic_axes',
                 contact_proxy=contact, outer_weight=outer_weight)
     if args.save_vectors:
         data['eigenvectors'] = vectors

@@ -20,10 +20,11 @@ import itertools
 import warnings
 from pathlib import Path
 import numpy as np
-from silicon_unstrained import A, BONDS, onsite, hopping, make_real_space
+from silicon_unstrained import A, BONDS, onsite, hopping, make_real_space, bloch_hamiltonian
 from scipy.sparse import identity
 from scipy.sparse.linalg import splu, LinearOperator, lobpcg
-from silicon_bi_donor import bulk_edges, box_geometry
+
+
 
 # ----------------------------------------------------------------------------
 # PARAMETER BLOCK: edit here (command-line flags override these defaults)
@@ -35,6 +36,36 @@ NLEVELS = 24           # states requested on each side of the gap (sparse route)
 DEGEN_TOL = 1e-6       # eV; levels closer than this are grouped as degenerate
 OUT = 'results/si_box'
 # ----------------------------------------------------------------------------
+
+
+
+
+def bulk_edges(spin=True):
+    """Find the Delta-valley minimum along Gamma-X for this unstrained host.
+    Assumes known silicon valley location; not a global Brillouin-zone search.
+    fraction tells what percentage away the CBM from the gamma point.
+    """
+    occupied = 8 if spin else 4
+    def conduction(t):
+        return np.linalg.eigvalsh(bloch_hamiltonian([t*2*np.pi/A, 0, 0], spin))[occupied]
+    grid = np.linspace(0, 1, 101)
+    j = int(np.argmin([conduction(t) for t in grid]))
+    result = minimize_scalar(conduction, bounds=(grid[max(0,j-1)], grid[min(100,j+1)]),
+                             method='bounded', options={'xatol':1e-12})
+    candidates = [(result.fun, result.x), (conduction(0), 0.), (conduction(1), 1.)]
+    cbm, fraction = min(candidates)
+    vbm = np.linalg.eigvalsh(bloch_hamiltonian([0,0,0], spin))[occupied-1]
+    return float(vbm), float(cbm), float(fraction)
+
+
+def box_geometry(ncells, periodic):
+    """Return (shape, lengths, pbc): cells per axis, box lengths (A), periodic flags."""
+    shape = np.broadcast_to(np.asarray(ncells, dtype=float), (3,))
+    if np.any(shape < 1) or np.any(shape != shape.astype(int)):
+        raise ValueError('ncells must contain positive integers')
+    shape = shape.astype(int)
+    pbc = np.broadcast_to(np.asarray(periodic, dtype=bool), (3,))
+    return shape, shape*A, pbc
 
 
 def bloch_batch(frac, spin=True):
