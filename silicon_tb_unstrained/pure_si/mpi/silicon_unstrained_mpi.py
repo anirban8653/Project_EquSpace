@@ -39,8 +39,6 @@ BASIS_Q = np.array([[0,0,0],[0,2,2],[2,0,2],[2,2,0],
 
 
 
-
-
 def _d_tensors():
     """Orthonormal traceless tensors representing the five real d harmonics."""
     q = np.zeros((5,3,3))
