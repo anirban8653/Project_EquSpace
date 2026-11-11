@@ -35,7 +35,7 @@ PERIODIC = True        # periodic boundaries: bool, or (px, py, pz)
 SPIN = True            # include spin-orbit / spin degrees of freedom
 NLEVELS = 24           # states requested on each side of the gap (sparse route)
 DEGEN_TOL = 1e-6       # eV; levels closer than this are grouped as degenerate
-OUT = 'results/si_box'
+OUT = f'results/si_box_{NCELLS}'
 # ----------------------------------------------------------------------------
 
 

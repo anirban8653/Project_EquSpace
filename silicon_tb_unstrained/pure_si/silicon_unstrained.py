@@ -161,7 +161,8 @@ def make_real_space(ncells=10, periodic=True, spin=True):
             add_blocks(src,dst,t); add_blocks(dst,src,t.conj().T)
     dim=len(q)*norb
     h=coo_matrix((np.concatenate(values),(np.concatenate(rows),np.concatenate(cols))),shape=(dim,dim)).tocsr()
-    h.sum_duplicates(); h.eliminate_zeros()
+    h.sum_duplicates()
+    h.eliminate_zeros()
     return h,q*A/4
 
 # H_k = bloch_hamiltonian([0,0,0], spin=True)
@@ -175,3 +176,43 @@ def make_real_space(ncells=10, periodic=True, spin=True):
 
 # print(H.shape)
 # print(positions.shape)
+
+if __name__ == "__main__":
+    import scipy.sparse as sp
+    import scipy.sparse.linalg as spla
+    import time
+
+    NCELLS = 5
+    t_start = time.perf_counter()
+
+    t0 = time.perf_counter()
+    H, positions = make_real_space(ncells=NCELLS, periodic=True, spin=True)
+    t_build = time.perf_counter() - t0
+
+    print("Hamiltonian shape:", H.shape)
+    print("Positions shape:", positions.shape)
+
+    sparse_bytes = H.data.nbytes + H.indices.nbytes + H.indptr.nbytes
+    print("Nonzeros:", H.nnz)
+    print(f"Sparse (CSR) Hamiltonian memory: {sparse_bytes/1024**2:.2f} MB ({sparse_bytes/1024**3:.4f} GB)")
+    print(f"Equivalent dense memory would be: {H.shape[0]*H.shape[1]*H.dtype.itemsize/1024**3:.2f} GB")
+
+    sigma = 1.173  # target eigenvalue
+    # NB: do not name this A -- that is the lattice constant used by make_real_space
+    H_shift = (H - sigma * sp.identity(H.shape[0], dtype=H.dtype, format='csc')).tocsc()
+    t0 = time.perf_counter()
+    lu = spla.splu(H_shift, permc_spec='MMD_AT_PLUS_A')   # far less fill than COLAMD for symmetric patterns
+    t_lu = time.perf_counter() - t0
+    print(f"LU fill: nnz(L)+nnz(U) = {lu.L.nnz + lu.U.nnz}")
+    OPinv = spla.LinearOperator(H_shift.shape, matvec=lu.solve, dtype=H_shift.dtype)
+    t0 = time.perf_counter()
+    vals, vecs = spla.eigsh(H, k=40, sigma=sigma, which='LM', OPinv=OPinv, tol=1e-10)
+    t_eigs = time.perf_counter() - t0
+
+    print("Eigenvalues near sigma:", vals[:10])  # print first 10 eigenvalues near sigma
+
+    print(f"\nTiming for ncells={NCELLS} (dim={H.shape[0]}):")
+    print(f"  build H     : {t_build:9.2f} s")
+    print(f"  LU factor   : {t_lu:9.2f} s")
+    print(f"  eigsh       : {t_eigs:9.2f} s")
+    print(f"  total       : {time.perf_counter() - t_start:9.2f} s")
