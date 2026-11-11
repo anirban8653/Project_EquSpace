@@ -31,12 +31,12 @@ from scipy.sparse.linalg import lobpcg
 # ----------------------------------------------------------------------------
 # PARAMETER BLOCK: edit here (command-line flags override these defaults)
 # ----------------------------------------------------------------------------
-NCELLS = 7             # conventional cells per axis: int, or (Nx, Ny, Nz)
+NCELLS = 5             # conventional cells per axis: int, or (Nx, Ny, Nz)
 PERIODIC = True        # periodic boundaries: bool, or (px, py, pz)
 SPIN = True            # include spin-orbit / spin degrees of freedom
 NLEVELS = 24           # states requested on each side of the gap (sparse route)
 DEGEN_TOL = 1e-6       # eV; levels closer than this are grouped as degenerate
-OUT = f'results/si_box_{NCELLS}'
+OUT = None               # default: results/si_box_<Nx>x<Ny>x<Nz>[_open]
 # ----------------------------------------------------------------------------
 
 
@@ -86,7 +86,8 @@ def bloch_batch(frac, spin=True):
     return np.linalg.eigvalsh(h)
 
 
-def solve_edge(h, sigma, nlevels, side, seed=0, tol=1e-8, maxiter=500):
+def solve_edge(h, sigma, nlevels, side, seed=0, tol=1e-8, maxiter=500,
+               res_tol=1e-8, chunk=20):
     """The nlevels eigenstates just above (side='above') or below sigma.
 
     Block solver (LOBPCG) on the shift-inverted operator (H-sigma)^-1 (MKL Pardiso), so exact
@@ -94,19 +95,34 @@ def solve_edge(h, sigma, nlevels, side, seed=0, tol=1e-8, maxiter=500):
     single-vector Krylov method and can drop members of degenerate multiplets
     (seen here: a 12-fold box level came back as 9). sigma must lie in a gap
     so that all wanted states are on one side of it.
+
+    LOBPCG's own stopping test requires EVERY block vector to converge,
+    including the guard vectors; when the guards cut a large degenerate shell
+    they never converge and LOBPCG runs to maxiter. So LOBPCG is run in short
+    chunks, restarted from its last block, and stopped as soon as the wanted
+    nlevels states have ||H v - E v|| < res_tol (eV).
     """
     n = h.shape[0]
     op = shift_invert_op(h, sigma)   # MKL Pardiso (SuperLU fallback), block-capable
     block = nlevels + max(8, nlevels//2)        # guard vectors for cut multiplets
-    x0 = np.random.default_rng(seed).normal(size=(n, block)) + 0j
-    with warnings.catch_warnings():  # convergence is checked by the residuals below
-        warnings.simplefilter('ignore', UserWarning)
-        _, vec = lobpcg(op, x0, largest=(side == 'above'), tol=tol, maxiter=maxiter)
-    energy = np.real(np.einsum('ij,ij->j', vec.conj(), h @ vec))
-    order = np.argsort(energy) if side == 'above' else np.argsort(energy)[::-1]
-    energy, vec = energy[order][:nlevels], vec[:, order][:, :nlevels]
-    residual = np.linalg.norm(h @ vec - vec*energy, axis=0)
-    return energy, vec, residual
+    x = np.random.default_rng(seed).normal(size=(n, block)) + 0j
+    done = 0
+    while True:
+        with warnings.catch_warnings():  # convergence is checked by the residuals below
+            warnings.simplefilter('ignore', UserWarning)
+            _, x = lobpcg(op, x, largest=(side == 'above'), tol=tol,
+                          maxiter=min(chunk, maxiter - done))
+        done += chunk
+        energy = np.real(np.einsum('ij,ij->j', x.conj(), h @ x))
+        order = np.argsort(energy) if side == 'above' else np.argsort(energy)[::-1]
+        e, vec = energy[order][:nlevels], x[:, order][:, :nlevels]
+        residual = np.linalg.norm(h @ vec - vec*e, axis=0)
+        if residual.max() < res_tol or done >= maxiter:
+            break
+    if residual.max() >= res_tol:
+        warnings.warn(f'solve_edge({side}): max residual {residual.max():.1e} eV '
+                      f'after {done} iterations')
+    return e, vec, residual
 
 
 def box_kpoints(shape):
@@ -254,7 +270,8 @@ def main():
             dv = np.abs(np.sort(ve) - results['folded'][0]).max()
             print(f'  max |sparse - folded|: conduction {dc:.2e} eV, valence {dv:.2e} eV')
 
-    out = Path(args.out)
+    out = Path(args.out or 'results/si_box_' + 'x'.join(map(str, shape))
+               + ('' if np.all(pbc) else '_open') + ('' if spin else '_spinless'))
     out.parent.mkdir(parents=True, exist_ok=True)
     save = dict(vbm_bulk_eV=vbm, cbm_bulk_eV=cbm, valley_fraction=valley,
                 ncells=shape, periodic=pbc, spin=spin)

@@ -180,35 +180,50 @@ def make_real_space(ncells=10, periodic=True, spin=True):
 # print(H.shape)
 # print(positions.shape)
 
-# Fast shift-invert eigensolver for complex Hermitian sparse H (MKL Pardiso, fallback SuperLU).
+# Fast shift-invert eigensolver for complex Hermitian sparse H.
+# Order of preference:
+#   1. pydiso: MKL Pardiso in native complex-Hermitian LDL^H mode (upper triangle only).
+#      ~4x faster factorisation and ~3.5x less memory than option 2.
+#   2. pypardiso: MKL Pardiso, real-only, so it solves the exact real 2N system
+#      [[Re M, -Im M], [Im M, Re M]]. Correct, but memory-hungry.
+#   3. SciPy SuperLU with a symmetric-structure ordering.
+# All three accept a block of right-hand sides (matmat), which LOBPCG uses.
 
-def shift_invert_op(H, sigma):
+def shift_invert_op(H, sigma, refine=2):
     n = H.shape[0]
     M = (H - sigma*sp.identity(n, format='csr', dtype=H.dtype)).tocsr()
+    cplx = np.iscomplexobj(M.data)
     try:
-        import pypardiso
-        if np.iscomplexobj(M.data):
-            # Pardiso in pypardiso is real-only: solve the equivalent real 2N system
-            R = sp.bmat([[M.real, -M.imag], [M.imag, M.real]], format='csr')
-        else:
-            R = M
-        solver = pypardiso.PyPardisoSolver()
-        solver.factorize(R)
-        if np.iscomplexobj(M.data):
-            def mv(b):  # b: (n,) or (n, m); Pardiso handles multiple right-hand sides
-                b = np.asarray(b)
-                y = solver.solve(R, np.concatenate([b.real, b.imag], axis=0))
-                return y[:n] + 1j*y[n:]
-        else:
-            mv = lambda b: solver.solve(R, np.asarray(b))
+        from pydiso.mkl_solver import MKLPardisoSolver
+        mtype = 'complex_hermitian_indefinite' if cplx else 'real_symmetric_indefinite'
+        solver = MKLPardisoSolver(sp.triu(M, format='csr'), matrix_type=mtype,
+                                  max_iterative_refinement_steps=refine)
+        mv = lambda b: solver.solve(np.ascontiguousarray(b, dtype=M.dtype))
     except ImportError:
-        # symmetric-structure ordering: ~3x faster than SciPy's default COLAMD
-        lu = splu(M.tocsc(), permc_spec='MMD_AT_PLUS_A', options=dict(SymmetricMode=True))
-        mv = lu.solve
+        try:
+            import pypardiso
+            R = sp.bmat([[M.real, -M.imag], [M.imag, M.real]], format='csr') if cplx else M
+            psolver = pypardiso.PyPardisoSolver()
+            psolver.factorize(R)
+            if cplx:
+                def mv(b):  # b: (n,) or (n, m); Pardiso handles multiple right-hand sides
+                    b = np.asarray(b)
+                    y = psolver.solve(R, np.concatenate([b.real, b.imag], axis=0))
+                    return y[:n] + 1j*y[n:]
+            else:
+                mv = lambda b: psolver.solve(R, np.asarray(b))
+        except ImportError:
+            # symmetric-structure ordering: ~3x faster than SciPy's default COLAMD
+            lu = splu(M.tocsc(), permc_spec='MMD_AT_PLUS_A', options=dict(SymmetricMode=True))
+            mv = lu.solve
     return LinearOperator((n, n), matvec=lambda b: mv(np.asarray(b).ravel()),
                           matmat=lambda B: mv(np.asarray(B)), dtype=H.dtype)
 
 def eigs_near(H, sigma, k=40, tol=1e-10, **kw):
+    """ARPACK shift-invert. Single-vector Lanczos can drop members of exactly
+    degenerate multiplets (12-fold Delta-valley shells here): request ~2x the
+    states you need and trust only the lowest complete levels, or use the
+    LOBPCG block solver (silicon_pure_box.solve_edge) when completeness matters."""
     OPinv = shift_invert_op(H, sigma)
     vals, vecs = eigsh(H, k=k, sigma=sigma, which='LM', OPinv=OPinv, tol=tol, **kw)
     idx = np.argsort(vals)
@@ -217,7 +232,7 @@ def eigs_near(H, sigma, k=40, tol=1e-10, **kw):
 
 
 if __name__ == "__main__":
-    NCELLS = 7
+    NCELLS = 5
     SIGMA = 1.173  # target energy (eV)
 
     t0 = time.perf_counter()
