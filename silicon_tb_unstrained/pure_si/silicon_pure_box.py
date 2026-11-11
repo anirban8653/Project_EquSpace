@@ -17,20 +17,21 @@ Energies eV; lengths Angstrom; k in units of 2pi/a.
 """
 import argparse
 import itertools
+import time
 import warnings
 from pathlib import Path
 from scipy.optimize import minimize_scalar
 import numpy as np
-from silicon_unstrained import A, BONDS, onsite, hopping, make_real_space, bloch_hamiltonian
-from scipy.sparse import identity
-from scipy.sparse.linalg import splu, LinearOperator, lobpcg
+from silicon_unstrained import (A, BONDS, onsite, hopping, make_real_space,
+                                bloch_hamiltonian, shift_invert_op)
+from scipy.sparse.linalg import lobpcg
 
 
 
 # ----------------------------------------------------------------------------
 # PARAMETER BLOCK: edit here (command-line flags override these defaults)
 # ----------------------------------------------------------------------------
-NCELLS = 2             # conventional cells per axis: int, or (Nx, Ny, Nz)
+NCELLS = 7             # conventional cells per axis: int, or (Nx, Ny, Nz)
 PERIODIC = True        # periodic boundaries: bool, or (px, py, pz)
 SPIN = True            # include spin-orbit / spin degrees of freedom
 NLEVELS = 24           # states requested on each side of the gap (sparse route)
@@ -88,19 +89,14 @@ def bloch_batch(frac, spin=True):
 def solve_edge(h, sigma, nlevels, side, seed=0, tol=1e-8, maxiter=500):
     """The nlevels eigenstates just above (side='above') or below sigma.
 
-    Block solver (LOBPCG) on the shift-inverted operator (H-sigma)^-1, so exact
+    Block solver (LOBPCG) on the shift-inverted operator (H-sigma)^-1 (MKL Pardiso), so exact
     multiplets are returned complete. ARPACK eigsh, as in solve_near, is a
     single-vector Krylov method and can drop members of degenerate multiplets
     (seen here: a 12-fold box level came back as 9). sigma must lie in a gap
     so that all wanted states are on one side of it.
     """
     n = h.shape[0]
-    t = (h - sigma*identity(n, format='csr')).tocsc()
-    lu = splu(t, permc_spec='MMD_AT_PLUS_A', options=dict(SymmetricMode=True))
-    def apply(x):
-        x = np.asarray(x)
-        return lu.solve(x.reshape(n, -1).astype(complex)).reshape(x.shape)
-    op = LinearOperator(h.shape, matvec=apply, matmat=apply, dtype=complex)
+    op = shift_invert_op(h, sigma)   # MKL Pardiso (SuperLU fallback), block-capable
     block = nlevels + max(8, nlevels//2)        # guard vectors for cut multiplets
     x0 = np.random.default_rng(seed).normal(size=(n, block)) + 0j
     with warnings.catch_warnings():  # convergence is checked by the residuals below
@@ -184,6 +180,7 @@ def scan(cells, spin=True):
 
 
 def main():
+    t_start = time.perf_counter()
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--ncells', type=int, nargs='+', default=None,
@@ -239,11 +236,13 @@ def main():
               'give dangling-bond states, so gap states here are NOT bulk-like.')
 
     if not args.no_sparse or not np.all(pbc):
+        t_sparse = time.perf_counter()
         h, positions = make_real_space(shape, periodic=pbc, spin=spin)
         print(f'\n[sparse] H={h.shape}; shift-invert + LOBPCG at both band edges...', flush=True)
         ce, _, cres = solve_edge(h, cbm - 0.01, args.nlevels, 'above')
         ve, _, vres = solve_edge(h, vbm + 0.01, args.nlevels, 'below')
         results['sparse'] = (np.sort(ve), np.sort(ce))
+        print(f'  sparse route time: {time.perf_counter() - t_sparse:.2f} s')
         print(f'  highest {len(ve)} valence:  {ve.max():.9f} ... {ve.min():.9f} eV'
               f'  (max residual {vres.max():.1e})')
         print(f'  lowest  {len(ce)} conduction: {ce.min():.9f} ... {ce.max():.9f} eV'
@@ -266,6 +265,7 @@ def main():
     save['Ev_box_eV'], save['Ec_box_eV'] = ref[0].max(), ref[1].min()
     np.savez(str(out) + '.npz', **save)
     print(f'\nSaved {out}.npz  (Ec_box_eV is the reference for donor binding energies)')
+    print(f'Total time: {time.perf_counter() - t_start:.2f} s')
 
 
 if __name__ == '__main__':

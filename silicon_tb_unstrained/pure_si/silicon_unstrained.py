@@ -4,8 +4,11 @@ Basis per atom: (s,px,py,pz,dxy,dyz,dzx,dx2-y2,d3z2-r2,s*).
 With SOC: orbital-major (s up,s down,px up,px down,...).
 No strain, impurity, Zeeman term, or surface passivation is included.
 """
+import time
 import numpy as np
+import scipy.sparse as sp
 from scipy.sparse import coo_matrix
+from scipy.sparse.linalg import eigsh, LinearOperator, splu
 
 #----------------------------------
 # hopping parameters
@@ -177,42 +180,58 @@ def make_real_space(ncells=10, periodic=True, spin=True):
 # print(H.shape)
 # print(positions.shape)
 
-if __name__ == "__main__":
-    import scipy.sparse as sp
-    import scipy.sparse.linalg as spla
-    import time
+# Fast shift-invert eigensolver for complex Hermitian sparse H (MKL Pardiso, fallback SuperLU).
 
-    NCELLS = 5
-    t_start = time.perf_counter()
+def shift_invert_op(H, sigma):
+    n = H.shape[0]
+    M = (H - sigma*sp.identity(n, format='csr', dtype=H.dtype)).tocsr()
+    try:
+        import pypardiso
+        if np.iscomplexobj(M.data):
+            # Pardiso in pypardiso is real-only: solve the equivalent real 2N system
+            R = sp.bmat([[M.real, -M.imag], [M.imag, M.real]], format='csr')
+        else:
+            R = M
+        solver = pypardiso.PyPardisoSolver()
+        solver.factorize(R)
+        if np.iscomplexobj(M.data):
+            def mv(b):  # b: (n,) or (n, m); Pardiso handles multiple right-hand sides
+                b = np.asarray(b)
+                y = solver.solve(R, np.concatenate([b.real, b.imag], axis=0))
+                return y[:n] + 1j*y[n:]
+        else:
+            mv = lambda b: solver.solve(R, np.asarray(b))
+    except ImportError:
+        # symmetric-structure ordering: ~3x faster than SciPy's default COLAMD
+        lu = splu(M.tocsc(), permc_spec='MMD_AT_PLUS_A', options=dict(SymmetricMode=True))
+        mv = lu.solve
+    return LinearOperator((n, n), matvec=lambda b: mv(np.asarray(b).ravel()),
+                          matmat=lambda B: mv(np.asarray(B)), dtype=H.dtype)
+
+def eigs_near(H, sigma, k=40, tol=1e-10, **kw):
+    OPinv = shift_invert_op(H, sigma)
+    vals, vecs = eigsh(H, k=k, sigma=sigma, which='LM', OPinv=OPinv, tol=tol, **kw)
+    idx = np.argsort(vals)
+    return vals[idx], vecs[:, idx]
+
+
+
+if __name__ == "__main__":
+    NCELLS = 7
+    SIGMA = 1.173  # target energy (eV)
 
     t0 = time.perf_counter()
     H, positions = make_real_space(ncells=NCELLS, periodic=True, spin=True)
     t_build = time.perf_counter() - t0
+    print("Hamiltonian shape:", H.shape, "| nonzeros:", H.nnz)
+    Hc = H.tocsr()
+    sparse_bytes = Hc.data.nbytes + Hc.indices.nbytes + Hc.indptr.nbytes
+    dense_bytes = H.shape[0] * H.shape[1] * H.dtype.itemsize
+    print(f"Sparse (CSR) memory: {sparse_bytes/1024**2:.2f} MB | dense equivalent: {dense_bytes/1024**3:.2f} GB")
 
-    print("Hamiltonian shape:", H.shape)
-    print("Positions shape:", positions.shape)
-
-    sparse_bytes = H.data.nbytes + H.indices.nbytes + H.indptr.nbytes
-    print("Nonzeros:", H.nnz)
-    print(f"Sparse (CSR) Hamiltonian memory: {sparse_bytes/1024**2:.2f} MB ({sparse_bytes/1024**3:.4f} GB)")
-    print(f"Equivalent dense memory would be: {H.shape[0]*H.shape[1]*H.dtype.itemsize/1024**3:.2f} GB")
-
-    sigma = 1.173  # target eigenvalue
-    # NB: do not name this A -- that is the lattice constant used by make_real_space
-    H_shift = (H - sigma * sp.identity(H.shape[0], dtype=H.dtype, format='csc')).tocsc()
     t0 = time.perf_counter()
-    lu = spla.splu(H_shift, permc_spec='MMD_AT_PLUS_A')   # far less fill than COLAMD for symmetric patterns
-    t_lu = time.perf_counter() - t0
-    print(f"LU fill: nnz(L)+nnz(U) = {lu.L.nnz + lu.U.nnz}")
-    OPinv = spla.LinearOperator(H_shift.shape, matvec=lu.solve, dtype=H_shift.dtype)
-    t0 = time.perf_counter()
-    vals, vecs = spla.eigsh(H, k=40, sigma=sigma, which='LM', OPinv=OPinv, tol=1e-10)
-    t_eigs = time.perf_counter() - t0
+    vals, vecs = eigs_near(H, SIGMA, k=40)
+    t_eig = time.perf_counter() - t0
 
-    print("Eigenvalues near sigma:", vals[:10])  # print first 10 eigenvalues near sigma
-
-    print(f"\nTiming for ncells={NCELLS} (dim={H.shape[0]}):")
-    print(f"  build H     : {t_build:9.2f} s")
-    print(f"  LU factor   : {t_lu:9.2f} s")
-    print(f"  eigsh       : {t_eigs:9.2f} s")
-    print(f"  total       : {time.perf_counter() - t_start:9.2f} s")
+    print("Eigenvalues near sigma (first 10):", vals[:10])
+    print(f"Timing (ncells={NCELLS}): build H {t_build:.2f} s | eigenvalues {t_eig:.2f} s")
