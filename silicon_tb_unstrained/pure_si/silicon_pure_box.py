@@ -85,28 +85,17 @@ def bloch_batch(frac, spin=True):
     h[:, n:, :n] = hab.conj().transpose(0, 2, 1)
     return np.linalg.eigvalsh(h)
 
-
 def solve_edge(h, sigma, nlevels, side, seed=0, tol=1e-8, maxiter=500,
                res_tol=1e-8, chunk=20):
-    """The nlevels eigenstates just above (side='above') or below sigma.
-
-    Block solver (LOBPCG) on the shift-inverted operator (H-sigma)^-1 (MKL Pardiso), so exact
-    multiplets are returned complete. ARPACK eigsh, as in solve_near, is a
-    single-vector Krylov method and can drop members of degenerate multiplets
-    (seen here: a 12-fold box level came back as 9). sigma must lie in a gap
-    so that all wanted states are on one side of it.
-
-    LOBPCG's own stopping test requires EVERY block vector to converge,
-    including the guard vectors; when the guards cut a large degenerate shell
-    they never converge and LOBPCG runs to maxiter. So LOBPCG is run in short
-    chunks, restarted from its last block, and stopped as soon as the wanted
-    nlevels states have ||H v - E v|| < res_tol (eV).
-    """
+    """(docstring unchanged)"""
     n = h.shape[0]
+    t0 = time.perf_counter()
     op = shift_invert_op(h, sigma)   # MKL Pardiso (SuperLU fallback), block-capable
+    print(f'  [{side}] factorization: {time.perf_counter() - t0:.1f} s', flush=True)
     block = nlevels + max(8, nlevels//2)        # guard vectors for cut multiplets
     x = np.random.default_rng(seed).normal(size=(n, block)) + 0j
     done = 0
+    t0 = time.perf_counter()
     while True:
         with warnings.catch_warnings():  # convergence is checked by the residuals below
             warnings.simplefilter('ignore', UserWarning)
@@ -117,6 +106,8 @@ def solve_edge(h, sigma, nlevels, side, seed=0, tol=1e-8, maxiter=500,
         order = np.argsort(energy) if side == 'above' else np.argsort(energy)[::-1]
         e, vec = energy[order][:nlevels], x[:, order][:, :nlevels]
         residual = np.linalg.norm(h @ vec - vec*e, axis=0)
+        print(f'  [{side}] {done:4d} it, {time.perf_counter() - t0:7.1f} s, '
+              f'max residual {residual.max():.1e} eV', flush=True)
         if residual.max() < res_tol or done >= maxiter:
             break
     if residual.max() >= res_tol:
@@ -253,8 +244,17 @@ def main():
 
     if not args.no_sparse or not np.all(pbc):
         t_sparse = time.perf_counter()
+        t_build = time.perf_counter()
         h, positions = make_real_space(shape, periodic=pbc, spin=spin)
-        print(f'\n[sparse] H={h.shape}; shift-invert + LOBPCG at both band edges...', flush=True)
+        t_build = time.perf_counter() - t_build
+        hc = h.tocsr()
+        sparse_bytes = hc.data.nbytes + hc.indices.nbytes + hc.indptr.nbytes
+        dense_bytes = h.shape[0] * h.shape[1] * h.dtype.itemsize
+        nnz_pct = 100.0 * h.nnz / (h.shape[0] * h.shape[1])
+        print(f'\n[sparse] H={h.shape}; built in {t_build:.2f} s | nonzeros: {h.nnz} ({nnz_pct:.6f}%)')
+        print(f'  Sparse (CSR) memory: {sparse_bytes/1024**2:.2f} MB | '
+              f'dense equivalent: {dense_bytes/1024**3:.2f} GB')
+        print('  shift-invert + LOBPCG at both band edges...', flush=True)
         ce, _, cres = solve_edge(h, cbm - 0.01, args.nlevels, 'above')
         ve, _, vres = solve_edge(h, vbm + 0.01, args.nlevels, 'below')
         results['sparse'] = (np.sort(ve), np.sort(ce))

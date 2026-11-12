@@ -232,21 +232,31 @@ def eigs_near(H, sigma, k=40, tol=1e-10, **kw):
 
 
 if __name__ == "__main__":
-    NCELLS = 5
-    SIGMA = 1.173  # target energy (eV)
+    import argparse
+    p = argparse.ArgumentParser(description="States of the periodic pure-Si box nearest sigma "
+                                            "(ARPACK shift-invert via eigs_near).")
+    p.add_argument('--ncells', type=int, default=7, help='conventional cells per axis')
+    p.add_argument('--sigma', type=float, default=1.173, help='target energy (eV)')
+    p.add_argument('--k', type=int, default=40, help='number of eigenvalues (over-request: '
+                                                     'ARPACK can drop degenerate copies)')
+    args = p.parse_args()
+    NCELLS, SIGMA, K = args.ncells, args.sigma, args.k
 
     t0 = time.perf_counter()
     H, positions = make_real_space(ncells=NCELLS, periodic=True, spin=True)
     t_build = time.perf_counter() - t0
-    print("Hamiltonian shape:", H.shape, "| nonzeros:", H.nnz)
+    print(f"Real-space Hamiltonian built in {t_build:.2f} s", flush=True)
+    nnz_pct = 100.0 * H.nnz / (H.shape[0] * H.shape[1])
+    print("Hamiltonian shape:", H.shape, f"| nonzeros: {H.nnz} ({nnz_pct:.6f}% of entries)", flush=True)
     Hc = H.tocsr()
     sparse_bytes = Hc.data.nbytes + Hc.indices.nbytes + Hc.indptr.nbytes
     dense_bytes = H.shape[0] * H.shape[1] * H.dtype.itemsize
     print(f"Sparse (CSR) memory: {sparse_bytes/1024**2:.2f} MB | dense equivalent: {dense_bytes/1024**3:.2f} GB")
 
     t0 = time.perf_counter()
-    vals, vecs = eigs_near(H, SIGMA, k=40)
+    vals, vecs = eigs_near(H, SIGMA, k=K)
     t_eig = time.perf_counter() - t0
 
-    print("Eigenvalues near sigma (first 10):", vals[:10])
-    print(f"Timing (ncells={NCELLS}): build H {t_build:.2f} s | eigenvalues {t_eig:.2f} s")
+    np.set_printoptions(precision=8, linewidth=100)
+    print(f"{K} eigenvalues nearest sigma={SIGMA} eV:\n{vals}")
+    print(f"Timing (ncells={NCELLS}): build H {t_build:.2f} s | eigenvalues {t_eig:.2f} s", flush=True)
