@@ -31,10 +31,10 @@ from scipy.sparse.linalg import lobpcg
 # ----------------------------------------------------------------------------
 # PARAMETER BLOCK: edit here (command-line flags override these defaults)
 # ----------------------------------------------------------------------------
-NCELLS = 5             # conventional cells per axis: int, or (Nx, Ny, Nz)
+NCELLS = 7             # conventional cells per axis: int, or (Nx, Ny, Nz)
 PERIODIC = True        # periodic boundaries: bool, or (px, py, pz)
 SPIN = True            # include spin-orbit / spin degrees of freedom
-NLEVELS = 24           # states requested on each side of the gap (sparse route)
+NLEVELS = 12           # conduction states requested (sparse route): the lowest 12-fold shell
 DEGEN_TOL = 1e-6       # eV; levels closer than this are grouped as degenerate
 OUT = None               # default: results/si_box_<Nx>x<Ny>x<Nz>[_open]
 # ----------------------------------------------------------------------------
@@ -85,14 +85,30 @@ def bloch_batch(frac, spin=True):
     h[:, n:, :n] = hab.conj().transpose(0, 2, 1)
     return np.linalg.eigvalsh(h)
 
+
 def solve_edge(h, sigma, nlevels, side, seed=0, tol=1e-8, maxiter=500,
                res_tol=1e-8, chunk=20):
-    """(docstring unchanged)"""
+    """The nlevels eigenstates just above (side='above') or below sigma.
+
+    Block solver (LOBPCG) on the shift-inverted operator (H-sigma)^-1 (MKL Pardiso), so exact
+    multiplets are returned complete. ARPACK eigsh, as in solve_near, is a
+    single-vector Krylov method and can drop members of degenerate multiplets
+    (seen here: a 12-fold box level came back as 9). sigma must lie in a gap
+    so that all wanted states are on one side of it.
+
+    LOBPCG's own stopping test requires EVERY block vector to converge,
+    including the guard vectors; when the guards cut a large degenerate shell
+    they never converge and LOBPCG runs to maxiter. So LOBPCG is run in short
+    chunks, restarted from its last block, and stopped as soon as the wanted
+    nlevels states have ||H v - E v|| < res_tol (eV).
+    """
     n = h.shape[0]
     t0 = time.perf_counter()
     op = shift_invert_op(h, sigma)   # MKL Pardiso (SuperLU fallback), block-capable
     print(f'  [{side}] factorization: {time.perf_counter() - t0:.1f} s', flush=True)
-    block = nlevels + max(8, nlevels//2)        # guard vectors for cut multiplets
+    # Guard vectors: enough to cover the next 12-fold box shell, so the block edge
+    # does not cut it (a cut shell roughly doubles the iteration count).
+    block = nlevels + max(16, nlevels//2)
     x = np.random.default_rng(seed).normal(size=(n, block)) + 0j
     done = 0
     t0 = time.perf_counter()
@@ -195,6 +211,9 @@ def main():
     parser.add_argument('--periodic', choices=['true', 'false'], nargs='+', default=None)
     parser.add_argument('--spinless', action='store_true')
     parser.add_argument('--nlevels', type=int, default=NLEVELS)
+    parser.add_argument('--valence', action='store_true',
+                        help='also solve the valence edge in the sparse route (off by default: '
+                             'in a periodic box E_v^box is always the bulk VBM at Gamma)')
     parser.add_argument('--no-sparse', action='store_true',
                         help='skip the real-space shift-invert check (periodic boxes only)')
     parser.add_argument('--scan', type=int, nargs='+', metavar='N',
@@ -244,31 +263,28 @@ def main():
 
     if not args.no_sparse or not np.all(pbc):
         t_sparse = time.perf_counter()
-        t_build = time.perf_counter()
         h, positions = make_real_space(shape, periodic=pbc, spin=spin)
-        t_build = time.perf_counter() - t_build
-        hc = h.tocsr()
-        sparse_bytes = hc.data.nbytes + hc.indices.nbytes + hc.indptr.nbytes
-        dense_bytes = h.shape[0] * h.shape[1] * h.dtype.itemsize
-        nnz_pct = 100.0 * h.nnz / (h.shape[0] * h.shape[1])
-        print(f'\n[sparse] H={h.shape}; built in {t_build:.2f} s | nonzeros: {h.nnz} ({nnz_pct:.6f}%)')
-        print(f'  Sparse (CSR) memory: {sparse_bytes/1024**2:.2f} MB | '
-              f'dense equivalent: {dense_bytes/1024**3:.2f} GB')
-        print('  shift-invert + LOBPCG at both band edges...', flush=True)
+        print(f'\n[sparse] H={h.shape}; shift-invert + LOBPCG at the conduction edge' + (' and valence edge' if args.valence else '') + '...', flush=True)
         ce, _, cres = solve_edge(h, cbm - 0.01, args.nlevels, 'above')
-        ve, _, vres = solve_edge(h, vbm + 0.01, args.nlevels, 'below')
+        if args.valence:
+            ve, _, vres = solve_edge(h, vbm + 0.01, args.nlevels, 'below')
+        else:
+            ve = vres = np.array([])
         results['sparse'] = (np.sort(ve), np.sort(ce))
         print(f'  sparse route time: {time.perf_counter() - t_sparse:.2f} s')
-        print(f'  highest {len(ve)} valence:  {ve.max():.9f} ... {ve.min():.9f} eV'
-              f'  (max residual {vres.max():.1e})')
+        if len(ve):
+            print(f'  highest {len(ve)} valence:  {ve.max():.9f} ... {ve.min():.9f} eV'
+                  f'  (max residual {vres.max():.1e})')
         print(f'  lowest  {len(ce)} conduction: {ce.min():.9f} ... {ce.max():.9f} eV'
               f'  (max residual {cres.max():.1e})')
         for e, deg, _ in group_levels(ce)[:8]:
             print(f'    {e:.8f} {1000*(e-cbm):14.3f} meV  deg {deg}')
         if 'folded' in results:
             dc = np.abs(np.sort(ce) - results['folded'][1]).max()
-            dv = np.abs(np.sort(ve) - results['folded'][0]).max()
-            print(f'  max |sparse - folded|: conduction {dc:.2e} eV, valence {dv:.2e} eV')
+            msg = f'  max |sparse - folded|: conduction {dc:.2e} eV'
+            if len(ve):
+                msg += f', valence {np.abs(np.sort(ve) - results["folded"][0]).max():.2e} eV'
+            print(msg)
 
     out = Path(args.out or 'results/si_box_' + 'x'.join(map(str, shape))
                + ('' if np.all(pbc) else '_open') + ('' if spin else '_spinless'))
@@ -279,7 +295,9 @@ def main():
         save[f'{key}_valence_eV'] = v
         save[f'{key}_conduction_eV'] = c
     ref = results.get('folded', results.get('sparse'))
-    save['Ev_box_eV'], save['Ec_box_eV'] = ref[0].max(), ref[1].min()
+    save['Ec_box_eV'] = ref[1].min()
+    if len(ref[0]):
+        save['Ev_box_eV'] = ref[0].max()
     np.savez(str(out) + '.npz', **save)
     print(f'\nSaved {out}.npz  (Ec_box_eV is the reference for donor binding energies)')
     print(f'Total time: {time.perf_counter() - t_start:.2f} s')
